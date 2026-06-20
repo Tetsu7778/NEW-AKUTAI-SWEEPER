@@ -1,0 +1,1189 @@
+<!--
+  悪態スイーパー / AKUTAI SWEEPER
+  サッカーの守備位置「スイーパー」がゴールに飛んでくる悪態をブロックし、
+  受け止めた悪態を Claude (AI) が優しい言葉に「浄化」して打ち返すゲーム。
+  単一HTMLで完結。Anthropic API で悪態＋浄化ワードを動的生成（失敗時は内蔵辞書で稼働）。
+-->
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>悪態スイーパー</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Noto+Sans+JP:wght@400;700;900&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --pitch-deep:#06140c;
+    --pitch:#15532f;
+    --pitch-stripe:#0f4427;
+    --chalk:#eef4e0;
+    --akutai:#ff4b56;
+    --akutai-glow:#ff8a8a;
+    --purify:#ffd45e;
+    --purify-soft:#fff0bd;
+    --sweeper:#52d6ff;
+    --ink:#06140c;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0; height:100%; background:#03100a; overflow:hidden;
+    font-family:"Noto Sans JP",system-ui,sans-serif;}
+  #wrap{
+    position:relative; width:100%; height:100dvh; max-width:520px; margin:0 auto;
+    background:radial-gradient(120% 80% at 50% -10%, #1d6b3e 0%, var(--pitch) 38%, var(--pitch-deep) 100%);
+    overflow:hidden; user-select:none; touch-action:none;
+  }
+  canvas{position:absolute; inset:0; width:100%; height:100%; display:block;}
+
+  /* HUD */
+  #hud{position:absolute; inset:0; pointer-events:none; padding:14px 16px;
+    display:flex; flex-direction:column; justify-content:space-between;}
+  .hud-top{display:flex; align-items:flex-start; justify-content:space-between; gap:10px;}
+  .lives{display:flex; gap:6px; font-size:22px; line-height:1; filter:drop-shadow(0 2px 3px rgba(0,0,0,.5));}
+  .life{transition:transform .2s, opacity .2s;}
+  .life.gone{opacity:.22; transform:scale(.78);}
+  .score-box{text-align:right; color:var(--chalk); text-shadow:0 2px 5px rgba(0,0,0,.6);}
+  .score-label{font-size:11px; letter-spacing:.22em; opacity:.7; font-weight:700;}
+  .score-val{font-family:"Anton",sans-serif; font-size:40px; line-height:.9; letter-spacing:.02em;}
+  .combo{position:absolute; top:64px; left:50%; transform:translateX(-50%);
+    font-family:"Anton",sans-serif; color:var(--purify); font-size:26px; opacity:0;
+    text-shadow:0 0 14px rgba(255,212,94,.6); transition:opacity .15s; white-space:nowrap;}
+  .combo.show{opacity:1;}
+
+  .ai-badge{position:absolute; top:14px; left:50%; transform:translateX(-50%);
+    pointer-events:none; display:flex; align-items:center; gap:7px;
+    background:rgba(6,20,12,.55); border:1px solid rgba(255,212,94,.35);
+    color:var(--purify-soft); font-size:11px; font-weight:700; letter-spacing:.04em;
+    padding:5px 11px; border-radius:999px; backdrop-filter:blur(4px); white-space:nowrap;}
+  .ai-badge .dot{width:7px; height:7px; border-radius:50%; background:var(--purify);
+    box-shadow:0 0 8px var(--purify);}
+  .ai-badge.gen .dot{animation:pulse .8s infinite;}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.3;transform:scale(.6);}}
+
+  /* Overlays */
+  .overlay{position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; text-align:center; padding:30px;
+    color:var(--chalk); background:radial-gradient(80% 60% at 50% 40%, rgba(3,16,10,.55), rgba(3,16,10,.92));
+    backdrop-filter:blur(2px); z-index:5;}
+  .overlay.hidden{display:none;}
+  .kicker{font-size:12px; letter-spacing:.42em; font-weight:700; color:var(--purify);
+    opacity:.9; margin-bottom:10px;}
+  .title{font-family:"Anton",sans-serif; font-size:clamp(46px,15vw,78px); line-height:.86;
+    margin:0; letter-spacing:.01em;
+    background:linear-gradient(180deg,#fff 0%, #ffe9a8 60%, var(--purify) 100%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    filter:drop-shadow(0 4px 10px rgba(0,0,0,.5));}
+  .title .jp{display:block; font-size:clamp(26px,8.5vw,42px); margin-top:4px;}
+  .lede{max-width:330px; font-size:14px; line-height:1.7; color:#d8e4cf; margin:18px 0 6px;}
+  .controls-hint{font-size:12px; color:#9fb39a; margin-top:14px; line-height:1.6;}
+  .btn{margin-top:26px; pointer-events:auto; cursor:pointer; border:none;
+    font-family:"Anton",sans-serif; font-size:24px; letter-spacing:.06em;
+    color:var(--ink); background:linear-gradient(180deg,#ffe9a8,var(--purify));
+    padding:15px 46px; border-radius:14px; box-shadow:0 8px 0 #b8902f, 0 14px 26px rgba(0,0,0,.45);
+    transition:transform .08s, box-shadow .08s;}
+  .btn:active{transform:translateY(5px); box-shadow:0 3px 0 #b8902f, 0 6px 14px rgba(0,0,0,.45);}
+
+  .result{display:flex; gap:26px; margin:22px 0 4px;}
+  .result .cell{display:flex; flex-direction:column; gap:3px;}
+  .result .num{font-family:"Anton",sans-serif; font-size:42px; line-height:.9; color:#fff;}
+  .result .num.gold{color:var(--purify);}
+  .result .cap{font-size:11px; letter-spacing:.14em; color:#9fb39a; font-weight:700;}
+  .go-title{font-family:"Anton",sans-serif; font-size:54px; margin:0; color:var(--akutai);
+    text-shadow:0 0 20px rgba(255,75,86,.5);}
+  .ai-note{margin-top:6px; font-size:11px; letter-spacing:.06em; color:var(--purify-soft);
+    opacity:.85; animation:pulse 1s infinite;}
+  .hiscore{margin-top:10px; font-size:13px; font-weight:700; color:var(--purify); letter-spacing:.08em;}
+  .best-line{margin-top:10px; font-size:13px; color:#bcd0b6;}
+  .best-line b{color:var(--purify-soft); font-size:17px; margin-left:4px;}
+  .record-badge{margin:10px 0 0; display:inline-block; font-family:"Anton",sans-serif; font-size:18px;
+    letter-spacing:.04em; color:var(--ink); background:linear-gradient(180deg,#ffe9a8,var(--purify));
+    padding:5px 18px; border-radius:999px; box-shadow:0 4px 16px rgba(255,212,94,.45);
+    animation:btnpulse 1s ease-in-out infinite;}
+  .record-badge.hidden{display:none;}
+
+  .mute{position:absolute; bottom:14px; right:16px; z-index:6; pointer-events:auto;
+    cursor:pointer; width:38px; height:38px; border-radius:50%;
+    background:rgba(6,20,12,.55); border:1px solid rgba(238,244,224,.25);
+    color:var(--chalk); font-size:16px; display:flex; align-items:center; justify-content:center;}
+
+  /* ===== オープニング（World Cup スプラッシュ） ===== */
+  .overlay.opening{
+    z-index:7;
+    background:
+      radial-gradient(90% 55% at 50% 16%, rgba(255,212,94,.22), transparent 62%),
+      radial-gradient(85% 70% at 50% 102%, rgba(82,214,255,.18), transparent 60%),
+      linear-gradient(180deg,#0b2c1a 0%, #07371f 46%, #04200f 100%);
+  }
+  .opening .wc-emojis,.opening .wc-kicker,.opening .wc-title,
+  .opening .wc-cup,.opening .btn,.opening .wc-hint{position:relative; z-index:1;}
+  .wc-emojis{font-size:42px; letter-spacing:8px; margin-bottom:6px;
+    filter:drop-shadow(0 4px 8px rgba(0,0,0,.55));}
+  .wc-kicker{font-size:12px; letter-spacing:.4em; font-weight:700;
+    color:var(--purify); opacity:.92; margin-bottom:8px;}
+  .wc-title{font-family:"Anton",sans-serif; font-size:clamp(52px,17vw,94px);
+    line-height:.82; margin:0; letter-spacing:.01em;
+    background:linear-gradient(180deg,#fff 0%, #ffe9a8 55%, var(--purify) 100%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    filter:drop-shadow(0 5px 12px rgba(0,0,0,.55));}
+  .wc-cup{font-family:"Anton",sans-serif; font-size:clamp(22px,7vw,34px);
+    letter-spacing:.2em; margin-top:12px; color:#fff;
+    text-shadow:0 0 16px rgba(82,214,255,.55), 0 0 32px rgba(255,212,94,.3);}
+  .wc-cup b{color:var(--purify); font-weight:400;}
+  .wc-hint{margin-top:16px; font-size:12px; color:#bcd0b6; letter-spacing:.04em;}
+  .btn.pulse{animation:btnpulse 1.3s ease-in-out infinite;}
+  @keyframes btnpulse{
+    0%,100%{transform:translateY(0); box-shadow:0 8px 0 #b8902f,0 14px 26px rgba(0,0,0,.45);}
+    50%{transform:translateY(-4px); box-shadow:0 12px 0 #b8902f,0 20px 30px rgba(0,0,0,.5);}}
+
+  /* 紙吹雪 */
+  #confetti{position:absolute; inset:0; overflow:hidden; pointer-events:none; z-index:8;}
+  #confetti i{position:absolute; top:-26px; display:block; border-radius:2px; opacity:.95;
+    animation:confFall linear forwards;}
+  @keyframes confFall{to{transform:translateY(116vh) rotate(680deg);}}
+
+  /* ===== 称号バナー（天使／神様の降臨） ===== */
+  #banner{position:absolute; top:34%; left:50%; width:100%; text-align:center;
+    transform:translate(-50%,-50%) scale(.7); opacity:0; pointer-events:none; z-index:6;}
+  #banner.show{animation:bannerPop 2.6s ease forwards;}
+  #banner .big{font-family:"Anton",sans-serif; font-size:clamp(36px,12vw,66px); line-height:1;
+    color:var(--purify); text-shadow:0 0 26px rgba(255,212,94,.7), 0 4px 10px rgba(0,0,0,.5);}
+  #banner .sub{margin-top:8px; font-size:14px; font-weight:700; color:#fff;
+    letter-spacing:.12em; text-shadow:0 2px 8px rgba(0,0,0,.6);}
+  @keyframes bannerPop{
+    0%{opacity:0; transform:translate(-50%,-50%) scale(.6);}
+    10%{opacity:1; transform:translate(-50%,-50%) scale(1.08);}
+    20%{transform:translate(-50%,-50%) scale(1);}
+    80%{opacity:1;} 100%{opacity:0; transform:translate(-50%,-50%) scale(1.02);}}
+</style>
+
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div id="confetti"></div>
+
+  <div id="hud">
+    <div class="hud-top">
+      <div class="lives" id="lives"></div>
+      <div class="score-box">
+        <div class="score-label">SCORE</div>
+        <div class="score-val" id="score">0</div>
+      </div>
+    </div>
+    <div></div>
+  </div>
+  <div class="combo" id="combo"></div>
+  <div class="ai-badge" id="aiBadge"><span class="dot"></span><span id="aiText">AI浄化エンジン</span></div>
+  <button class="mute" id="mute" title="サウンド">🔊</button>
+  <div id="banner"><div class="big"></div><div class="sub"></div></div>
+
+  <!-- OPENING (World Cup splash) -->
+  <div class="overlay opening" id="openingScreen">
+    <div class="wc-emojis">🏆⚽🎉</div>
+    <div class="wc-kicker">公式オープニングアンセム</div>
+    <h1 class="wc-title">悪態スイープ</h1>
+    <div class="wc-cup">WORLD&nbsp;CUP&nbsp;<b>2026</b></div>
+    <button class="btn pulse" id="openBtn">▶ 開幕</button>
+    <div class="wc-hint">タップでアンセム＆入場演出スタート<br>📱 iPhoneは本体横の消音スイッチOFF＋音量UPで音が出ます</div>
+  </div>
+
+  <!-- START -->
+  <div class="overlay hidden" id="startScreen">
+    <div class="kicker">AKUTAI SWEEPER</div>
+    <h1 class="title">SWEEPER<span class="jp">悪態スイーパー</span></h1>
+    <p class="lede">ゴールに飛んでくる<b style="color:var(--akutai)">悪態</b>を、最終ラインの<b style="color:var(--sweeper)">スイーパー</b>がすべて止めろ。<br>受け止めた悪態は <b style="color:var(--purify)">AIが優しい言葉に浄化</b>して打ち返す。</p>
+    <p class="controls-hint">スイーパーを左右に動かしてブロック<br>操作：ドラッグ／タップ　・　← →キー</p>
+    <div class="hiscore" id="hiScoreStart"></div>
+    <button class="btn" id="startBtn">キックオフ</button>
+  </div>
+
+  <!-- GAME OVER -->
+  <div class="overlay hidden" id="overScreen">
+    <h2 class="go-title">FULL TIME</h2>
+    <div class="record-badge hidden" id="rRecord">🏆 ハイスコア更新！</div>
+    <div class="result">
+      <div class="cell"><span class="num" id="rScore">0</span><span class="cap">SCORE</span></div>
+      <div class="cell"><span class="num gold" id="rPurify">0</span><span class="cap">浄化した悪態</span></div>
+      <div class="cell"><span class="num" id="rCombo">0</span><span class="cap">ベストコンボ</span></div>
+    </div>
+    <div class="best-line">これまでのベスト<b id="rBest">0</b></div>
+    <p class="lede" id="rMsg"></p>
+    <div class="ai-note" id="rAi">✨ AIがあなたへの講評を生成中…</div>
+    <button class="btn" id="retryBtn">もう一度</button>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   悪態スイーパー — メインロジック
+   ============================================================ */
+const cvs = document.getElementById('game');
+const ctx = cvs.getContext('2d');
+const wrap = document.getElementById('wrap');
+
+let W = 0, H = 0, DPR = 1;
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2.5);
+  W = wrap.clientWidth; H = wrap.clientHeight;
+  cvs.width = W * DPR; cvs.height = H * DPR;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  layout();
+}
+window.addEventListener('resize', resize);
+
+/* ---- レイアウト基準 ---- */
+let goalLineY, sweeperY, sweeperW;
+function layout(){
+  goalLineY = H - 78;
+  sweeperY  = H - 108;
+  sweeperW  = Math.max(58, Math.min(86, W*0.18));
+  sweeper.x = clamp(sweeper.x, sweeperW/2, W - sweeperW/2);
+}
+
+/* ============================================================
+   内蔵辞書（AI生成が間に合わない/失敗した時のフォールバック）
+   軽いヤジ → 優しい言葉 のペア
+   ============================================================ */
+const FALLBACK = [
+  ["へたくそ！","ナイスチャレンジ！"],
+  ["おそいぞ","落ち着いていこう"],
+  ["どけよ","一緒に行こう"],
+  ["ダサい","君らしくていいね"],
+  ["やる気あんの","その調子だよ"],
+  ["雑魚が","よくがんばってる"],
+  ["うざい","そばにいてくれて感謝"],
+  ["消えろ","ここにいていいよ"],
+  ["つまんない","一緒だと楽しい"],
+  ["無理に決まってる","きっとできるよ"],
+  ["弱すぎ","強くなってきてる"],
+  ["ばーか","ナイスファイト"],
+  ["帰れ","また明日もよろしく"],
+  ["見てらんない","ちゃんと見てるよ"],
+  ["センスない","君だけの良さがある"],
+  ["もうあきらめろ","あと一歩だよ"],
+  ["ノロマ","あわてなくて大丈夫"],
+  ["へなちょこ","powが伝わってくる"],
+];
+
+/* ============================================================
+   ワードキュー & AI生成
+   ============================================================ */
+let queue = [];           // {taunt, kind}
+let generating = false;
+
+function seedFallback(){
+  const arr = FALLBACK.map(p => ({taunt:p[0], kind:p[1]}));
+  shuffle(arr);
+  queue.push(...arr);
+}
+
+const aiBadge = document.getElementById('aiBadge');
+const aiText  = document.getElementById('aiText');
+function setAIState(gen){
+  if(gen){ aiBadge.classList.add('gen'); aiText.textContent = 'AIが言葉を生成中…'; }
+  else   { aiBadge.classList.remove('gen'); aiText.textContent = 'AIが浄化中'; }
+}
+
+async function generateWords(){
+  if(generating) return;
+  generating = true; setAIState(true);
+  const prompt =
+`あなたはサッカーゲーム「悪態スイーパー」用のデータ生成器です。
+相手サポーターがゴールに投げてくる「軽い悪態・ヤジ」と、それをスイーパーが受け止めてAIが浄化した「優しい言葉」のペアを作ってください。
+
+ルール:
+- 悪態は最大8文字程度、スタジアムのヤジ程度の軽さ。差別・性的・特定個人攻撃・過度に攻撃的な表現は禁止。
+- kind は taunt を真逆の優しい応援・思いやりに変換した言葉(最大10文字程度)。
+- 日本語。多様でユーモアのあるものを。
+
+出力は次のJSON配列のみ。説明やコードフェンスは一切不要:
+[{"taunt":"...","kind":"..."}, ...] を14個。`;
+  try{
+    const res = await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        model:"claude-sonnet-4-6", max_tokens:1000,
+        messages:[{role:"user", content: prompt}]
+      })
+    });
+    const data = await res.json();
+    const text = (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+    const clean = text.replace(/```json|```/g,"").trim();
+    const arr = JSON.parse(clean);
+    const good = arr.filter(o=>o && o.taunt && o.kind);
+    if(good.length){ queue.push(...good); }
+  }catch(e){
+    // ネットワーク/環境的にAPI不可でも、内蔵辞書で続行
+    seedFallback();
+  }finally{
+    generating = false;
+    if(state==='playing') setAIState(false);
+  }
+}
+
+function nextWord(){
+  if(queue.length < 6 && !generating) generateWords();  // 先読み補充
+  if(queue.length === 0) seedFallback();
+  return queue.shift();
+}
+
+/* ============================================================
+   ゲーム状態
+   ============================================================ */
+let state = 'opening';   // opening | menu | playing | over
+const sweeper = { x: 0, vx:0 };
+let words = [];        // 落下中の悪態
+let particles = [];
+let floats = [];       // 上昇する浄化ワード
+let lives, score, combo, bestCombo, purified;
+let spawnT, spawnGap, elapsed, shake, flash;
+
+function reset(){
+  words=[]; particles=[]; floats=[];
+  lives=3; score=0; combo=0; bestCombo=0; purified=0;
+  spawnT=0; spawnGap=1500; elapsed=0; shake=0; flash=0;
+  sweeper.x = W/2; sweeper.vx=0;
+  tier=0; god.active=false; god.t=0; godBeams.length=0; godT=0; slowmoT=0; stopGodMusic();
+  try{ speechSynthesis.cancel(); }catch(e){}
+  renderLives();
+  document.getElementById('score').textContent='0';
+}
+
+/* ---- スポーン ---- */
+function spawnWord(){
+  const w = nextWord();
+  const fontSize = Math.max(15, Math.min(22, W*0.046));
+  ctx.font = `700 ${fontSize}px "Noto Sans JP",sans-serif`;
+  const tw = ctx.measureText(w.taunt).width;
+  const padX = 16;
+  const halfW = tw/2 + padX;
+  const x = clamp(rand(halfW+8, W-halfW-8), halfW+8, W-halfW-8);
+  const speed = (H*0.18 + Math.min(elapsed/1000*4, H*0.16)) / 1000; // px/ms, 徐々に加速
+  words.push({ x, y:-30, vy:speed, text:w.taunt, kind:w.kind,
+               halfW, h:fontSize+18, fs:fontSize, crossed:false });
+}
+
+/* ============================================================
+   入力
+   ============================================================ */
+let pointerActive = false;
+function pointerMove(clientX){
+  const rect = wrap.getBoundingClientRect();
+  sweeper.x = clamp(clientX - rect.left, sweeperW/2, W - sweeperW/2);
+}
+wrap.addEventListener('pointerdown', e=>{ pointerActive=true; pointerMove(e.clientX); ensureAudio(); });
+wrap.addEventListener('pointermove', e=>{ if(pointerActive) pointerMove(e.clientX); });
+window.addEventListener('pointerup', ()=> pointerActive=false);
+
+const keys={left:false,right:false};
+window.addEventListener('keydown', e=>{
+  if(e.key==='ArrowLeft') keys.left=true;
+  if(e.key==='ArrowRight') keys.right=true;
+});
+window.addEventListener('keyup', e=>{
+  if(e.key==='ArrowLeft') keys.left=false;
+  if(e.key==='ArrowRight') keys.right=false;
+});
+
+/* ============================================================
+   サウンド（Web Audio・任意）
+   ============================================================ */
+let audioCtx=null, muted=false, musicGain=null;
+let _silentEl=null, _speechPrimed=false;
+function ensureAudio(){
+  if(!audioCtx){
+    try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ return; }
+    musicGain=audioCtx.createGain(); musicGain.gain.value=muted?0:0.5; musicGain.connect(audioCtx.destination);
+  }
+  if(audioCtx.state!=='running'){ try{audioCtx.resume();}catch(e){} }
+}
+
+/* iOSで無音になる問題への対策：
+   ・AudioContextはユーザー操作内でresume＋空バッファ再生で解錠
+   ・本体の消音スイッチ対策として、ほぼ無音のループ音源で再生セッションを確保
+   ・音声合成(speechSynthesis)は操作内で一度起動しておく必要がある */
+function _makeSilentWavUrl(sec){
+  const sr=8000, n=Math.floor(sr*sec), buf=new ArrayBuffer(44+n*2), dv=new DataView(buf);
+  const w=(o,s)=>{ for(let i=0;i<s.length;i++) dv.setUint8(o+i,s.charCodeAt(i)); };
+  w(0,'RIFF'); dv.setUint32(4,36+n*2,true); w(8,'WAVE'); w(12,'fmt ');
+  dv.setUint32(16,16,true); dv.setUint16(20,1,true); dv.setUint16(22,1,true);
+  dv.setUint32(24,sr,true); dv.setUint32(28,sr*2,true); dv.setUint16(32,2,true); dv.setUint16(34,16,true);
+  w(36,'data'); dv.setUint32(40,n*2,true);
+  return URL.createObjectURL(new Blob([buf],{type:'audio/wav'}));
+}
+function unlockAudio(){
+  ensureAudio();
+  if(audioCtx){
+    if(audioCtx.state!=='running'){ try{audioCtx.resume();}catch(e){} }
+    try{ const b=audioCtx.createBuffer(1,1,22050), s=audioCtx.createBufferSource();
+      s.buffer=b; s.connect(audioCtx.destination); s.start(0); }catch(e){}
+  }
+  try{
+    if(!_silentEl){
+      _silentEl=document.createElement('audio');
+      _silentEl.loop=true; _silentEl.setAttribute('playsinline',''); _silentEl.setAttribute('webkit-playsinline','');
+      _silentEl.preload='auto'; _silentEl.src=_makeSilentWavUrl(0.6); _silentEl.volume=0.02;
+      document.body.appendChild(_silentEl);
+    }
+    _silentEl.play().catch(()=>{});
+  }catch(e){}
+  try{
+    if(!_speechPrimed && 'speechSynthesis' in window){
+      const u=new SpeechSynthesisUtterance(' '); u.volume=0; speechSynthesis.speak(u); _speechPrimed=true;
+    }
+  }catch(e){}
+}
+['touchend','pointerdown','mousedown','keydown'].forEach(ev=>
+  window.addEventListener(ev, unlockAudio, {passive:true}));
+document.addEventListener('visibilitychange', ()=>{
+  if(!document.hidden){
+    if(audioCtx && audioCtx.state!=='running'){ try{audioCtx.resume();}catch(e){} }
+    if(_silentEl) _silentEl.play().catch(()=>{});
+  }
+});
+
+/* ---------- 開幕アンセム（オリジナル曲・Web Audio合成） ----------
+   D majorの I–V–vi–IV進行に明るいメロディを乗せたゲーム用アンセム。 */
+const _A4=440,_B4=493.88,_Cs5=554.37,_D5=587.33,_E5=659.25,_Fs5=739.99;
+const _D2=73.42,_A2=110,_B2=123.47,_G2=98.00,_E2=82.41,_Fs2=92.50;
+const PADS=[ [293.66,369.99,440],[220,277.18,329.63],[246.94,293.66,369.99],[196,246.94,293.66],
+            [293.66,369.99,440],[220,277.18,329.63],[246.94,293.66,369.99],[196,246.94,293.66] ];
+const BASS_ROOT=[_D2,_A2,_B2,_G2,_D2,_A2,_B2,_G2];
+const BASS_5TH =[_A2,_E2,_Fs2,_D2,_A2,_E2,_Fs2,_D2];
+const MEL={0:[_A4,2],2:[_A4,2],4:[_B4,2],6:[_Cs5,2],8:[_D5,4],
+  16:[_D5,2],18:[_Cs5,2],20:[_B4,2],22:[_A4,2],24:[_B4,4],
+  32:[_A4,2],34:[_A4,2],36:[_B4,2],38:[_Cs5,2],40:[_E5,4],
+  48:[_Fs5,2],50:[_E5,2],52:[_D5,2],54:[_Cs5,2],56:[_D5,4]};
+const TEMPO=132, _beat=60/TEMPO, STEP=_beat/2, TOTAL=64;
+let anthemOn=false, anthemTimer=null, curStep=0, nextT=0;
+
+function mTone(freq,t,dur,type,gain,filt){
+  if(!audioCtx) return;
+  const o=audioCtx.createOscillator(); o.type=type; o.frequency.setValueAtTime(freq,t);
+  const g=audioCtx.createGain(), a=0.012, r=Math.min(0.12,dur*0.4);
+  g.gain.setValueAtTime(0.0001,t);
+  g.gain.exponentialRampToValueAtTime(gain,t+a);
+  g.gain.setValueAtTime(gain,Math.max(t+a,t+dur-r));
+  g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  let lastNode=o;
+  if(filt){ const f=audioCtx.createBiquadFilter(); f.type='lowpass'; f.frequency.value=filt; o.connect(f); lastNode=f; }
+  lastNode.connect(g); g.connect(musicGain);
+  o.start(t); o.stop(t+dur+0.05);
+}
+function mKick(t){ if(!audioCtx)return; const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type='sine'; o.frequency.setValueAtTime(140,t); o.frequency.exponentialRampToValueAtTime(45,t+0.12);
+  g.gain.setValueAtTime(0.8,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.18);
+  o.connect(g); g.connect(musicGain); o.start(t); o.stop(t+0.2); }
+function mNoise(t,dur,hp,gain){ if(!audioCtx)return;
+  const n=Math.floor(audioCtx.sampleRate*dur), buf=audioCtx.createBuffer(1,n,audioCtx.sampleRate), d=buf.getChannelData(0);
+  for(let i=0;i<n;i++) d[i]=Math.random()*2-1;
+  const s=audioCtx.createBufferSource(); s.buffer=buf;
+  const f=audioCtx.createBiquadFilter(); f.type='highpass'; f.frequency.value=hp;
+  const g=audioCtx.createGain(); g.gain.setValueAtTime(gain,t); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  s.connect(f); f.connect(g); g.connect(musicGain); s.start(t); s.stop(t+dur+0.02); }
+
+function scheduleStep(s,t){
+  const bib=s%8, bar=(s/8)|0;
+  if(bib===0||bib===4) mKick(t);
+  if(bib===2||bib===6) mNoise(t,0.12,1800,0.3);   // スネア/クラップ
+  mNoise(t,0.04,7000,0.13);                        // ハイハット
+  if(bib===0||bib===4) mTone(BASS_ROOT[bar],t,STEP*0.9,'triangle',0.24,420);
+  if(bib===2||bib===6) mTone(BASS_5TH[bar], t,STEP*0.9,'triangle',0.18,420);
+  if(bib===0){ PADS[bar].forEach(f=>mTone(f,t,STEP*8*0.95,'sawtooth',0.045,1500)); } // ブラスパッド
+  const m=MEL[s]; if(m) mTone(m[0],t,STEP*m[1]*0.95,'sawtooth',0.13,3000);            // リード
+}
+function anthemSched(){
+  if(!anthemOn||!audioCtx) return;
+  while(nextT < audioCtx.currentTime+0.15){ scheduleStep(curStep,nextT); nextT+=STEP; curStep=(curStep+1)%TOTAL; }
+}
+function startAnthem(){
+  if(!audioCtx||anthemOn) return;
+  anthemOn=true; curStep=0; nextT=audioCtx.currentTime+0.06;
+  musicGain.gain.cancelScheduledValues(audioCtx.currentTime);
+  musicGain.gain.setValueAtTime(muted?0:0.5,audioCtx.currentTime);
+  anthemTimer=setInterval(anthemSched,25);
+}
+function stopAnthem(){
+  anthemOn=false; if(anthemTimer){clearInterval(anthemTimer); anthemTimer=null;}
+  if(audioCtx&&musicGain){ const t=audioCtx.currentTime;
+    musicGain.gain.cancelScheduledValues(t);
+    musicGain.gain.setValueAtTime(Math.max(0.0001,musicGain.gain.value),t);
+    musicGain.gain.exponentialRampToValueAtTime(0.0001,t+0.5); }
+}
+function playWhistle(){
+  if(!audioCtx||muted) return;
+  const t0=audioCtx.currentTime;
+  const chirp=(at)=>{
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain(),
+          lfo=audioCtx.createOscillator(), lg=audioCtx.createGain();
+    o.type='sine'; o.frequency.value=2300;
+    lfo.type='sine'; lfo.frequency.value=24; lg.gain.value=130;
+    lfo.connect(lg); lg.connect(o.frequency); lfo.start(at); lfo.stop(at+0.2);
+    g.gain.setValueAtTime(0.0001,at); g.gain.exponentialRampToValueAtTime(0.22,at+0.02);
+    g.gain.setValueAtTime(0.22,at+0.14); g.gain.exponentialRampToValueAtTime(0.0001,at+0.2);
+    o.connect(g); g.connect(audioCtx.destination); o.start(at); o.stop(at+0.22);
+  };
+  chirp(t0); chirp(t0+0.13);
+}
+
+/* 紙吹雪 */
+function confettiBurst(n){
+  const c=document.getElementById('confetti'); if(!c) return;
+  const cols=['#ffd45e','#52d6ff','#ff4b56','#7be08a','#ffffff'];
+  for(let i=0;i<(n||90);i++){
+    const p=document.createElement('i');
+    p.style.left=Math.random()*100+'%';
+    p.style.background=cols[i%cols.length];
+    p.style.width=(6+Math.random()*6)+'px';
+    p.style.height=(9+Math.random()*9)+'px';
+    p.style.animationDelay=(Math.random()*0.5)+'s';
+    p.style.animationDuration=(1.7+Math.random()*1.7)+'s';
+    c.appendChild(p);
+    setTimeout(()=>p.remove(), 3600);
+  }
+}
+
+/* ============================================================
+   天使（1000点〜） & サッカーの神様ジーコ（2000点〜）祝福モード
+   ============================================================ */
+const god={active:false, x:0, y:80, t:0};
+let tier=0, godT=0, godBeams=[], godMusicTimer=null, godChordIdx=0;
+
+function showBanner(big, sub, color){
+  const b=document.getElementById('banner');
+  b.querySelector('.big').textContent=big;
+  b.querySelector('.big').style.color=color||'var(--purify)';
+  b.querySelector('.sub').textContent=sub||'';
+  b.classList.remove('show'); void b.offsetWidth; b.classList.add('show');
+}
+
+function enterAngel(){
+  tier=1;
+  playAngelChime();
+  showBanner('天使 降臨', 'オーラが悪態を浄化する', '#fff3b0');
+}
+
+function enterFootballGod(){
+  tier=2;
+  god.active=true; god.x=W/2; god.y=Math.min(170,H*0.26); god.t=0;
+  flash=1; shake=12; slowmoT=SLOWMO_DUR;     // スローモーション演出
+  confettiBurst(130);                         // 紙吹雪
+  // 画面上の悪態をすべて祝福で一掃
+  for(const w of words){ spawnBeam(god.x,god.y,w.x,w.y); blockWord(w); }
+  words.length=0;
+  playCheer();
+  startGodMusic();
+  speakObrigado();
+  showBanner('Muito obrigado!', '神様ジーコ 降臨 ⚽', '#ffe066');
+}
+
+/* --- 天使のチャイム（ハープ風アルペジオ） --- */
+function playAngelChime(){
+  if(!audioCtx) return;
+  musicGain.gain.cancelScheduledValues(audioCtx.currentTime);
+  musicGain.gain.setValueAtTime(muted?0:0.5,audioCtx.currentTime);
+  const t=audioCtx.currentTime;
+  [523.25,659.25,783.99,1046.50,1318.51].forEach((f,i)=> mTone(f,t+i*0.08,0.55,'triangle',0.12,5000));
+}
+function playCheer(){ if(audioCtx&&!muted) mNoise(audioCtx.currentTime,0.6,500,0.22); }
+function playBlessZap(){
+  if(!audioCtx) return; const t=audioCtx.currentTime;
+  [783.99,1046.50,1318.51].forEach((f,i)=> mTone(f,t+i*0.05,0.25,'triangle',0.10,6000));
+}
+
+/* --- サッカーの神様の祝福ミュージック（明るいサンバ調・自作） --- */
+const GOD_CHORDS=[ [523.25,659.25,783.99],[587.33,739.99,880.00],[659.25,830.61,987.77],[587.33,739.99,880.00] ];
+const GOD_BASS=[130.81,146.83,164.81,146.83];
+function startGodMusic(){
+  if(!audioCtx||godMusicTimer) return;
+  musicGain.gain.cancelScheduledValues(audioCtx.currentTime);
+  musicGain.gain.setValueAtTime(muted?0:0.55,audioCtx.currentTime);
+  const dur=0.9; godChordIdx=0;
+  const step=()=>{
+    const t=audioCtx.currentTime+0.03, idx=godChordIdx%GOD_CHORDS.length, ch=GOD_CHORDS[idx];
+    ch.forEach(f=>mTone(f,t,dur*0.9,'sawtooth',0.05,2600));   // ブラス
+    mTone(GOD_BASS[idx],t,dur*0.9,'triangle',0.22,500);        // ベース
+    mKick(t);                                                  // サンバのキック
+    mNoise(t+dur*0.25,0.04,8000,0.10);                         // 刻み
+    mNoise(t+dur*0.5,0.05,5000,0.16);
+    mNoise(t+dur*0.75,0.04,8000,0.10);
+    mTone(ch[0]*2,t+dur*0.5,0.2,'triangle',0.06,5000);         // きらめき
+    godChordIdx++;
+  };
+  step(); godMusicTimer=setInterval(step, dur*1000);
+}
+function stopGodMusic(){ if(godMusicTimer){clearInterval(godMusicTimer); godMusicTimer=null;} }
+
+/* --- 「Obrigado!」を音声合成で発声 --- */
+function speakObrigado(){
+  try{
+    if(muted || !('speechSynthesis' in window)) return;
+    const u=new SpeechSynthesisUtterance('Muito obrigado!');
+    u.lang='pt-BR'; u.rate=0.95; u.pitch=1.05; u.volume=1;
+    const vs=speechSynthesis.getVoices(); const pv=vs.find(v=>/pt/i.test(v.lang));
+    if(pv) u.voice=pv;
+    speechSynthesis.cancel(); speechSynthesis.speak(u);
+  }catch(e){}
+}
+
+function spawnBeam(x1,y1,x2,y2){ godBeams.push({x1,y1,x2,y2,life:260}); }
+function beep(freq, dur, type, gain){
+  if(muted || !audioCtx) return;
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.type=type||'sine'; o.frequency.value=freq;
+  g.gain.value=gain||0.06;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(); o.stop(audioCtx.currentTime+dur);
+  g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime+dur);
+}
+function sBlock(){ beep(660,0.08,'triangle',0.05); setTimeout(()=>beep(990,0.12,'triangle',0.05),60); }
+function sConcede(){ beep(150,0.25,'sawtooth',0.08); }
+document.getElementById('mute').addEventListener('click', ()=>{
+  muted=!muted; document.getElementById('mute').textContent = muted?'🔇':'🔊';
+  if(musicGain) musicGain.gain.value = muted?0:0.5;
+});
+
+/* ============================================================
+   ゲームループ
+   ============================================================ */
+let last=0, slowmoT=0; const SLOWMO_DUR=1400;
+function loop(t){
+  let dt = Math.min(t-last, 50); last=t;
+  let f=1;
+  if(slowmoT>0){ slowmoT=Math.max(0,slowmoT-dt); f=0.3+0.7*(1-slowmoT/SLOWMO_DUR); }
+  if(state==='playing') update(dt*f);
+  render(dt);
+  requestAnimationFrame(loop);
+}
+
+function update(dt){
+  elapsed += dt;
+  // 難易度: スポーン間隔を徐々に短縮
+  spawnGap = Math.max(620, 1500 - elapsed/1000*22);
+  spawnT += dt;
+  if(spawnT >= spawnGap){ spawnT=0; spawnWord(); }
+
+  // キーボード移動
+  const kspeed = 0.62;
+  if(keys.left)  sweeper.x -= kspeed*dt;
+  if(keys.right) sweeper.x += kspeed*dt;
+  sweeper.x = clamp(sweeper.x, sweeperW/2, W - sweeperW/2);
+
+  // 悪態の更新 & 当たり判定
+  for(let i=words.length-1;i>=0;i--){
+    const w = words[i];
+    const prevY = w.y;
+    w.y += w.vy*dt;
+    // 天使オーラ：近づいた悪態を自動浄化（tier>=1）
+    if(tier>=1 && !w.crossed){
+      const dx=w.x-sweeper.x, dy=w.y-sweeperY, aur=(tier>=2?100:80);
+      if(dx*dx+dy*dy < aur*aur){ blockWord(w); words.splice(i,1); continue; }
+    }
+    // スイーパーのラインを跨いだ瞬間に判定
+    if(!w.crossed && prevY < sweeperY && w.y >= sweeperY){
+      w.crossed = true;
+      if(Math.abs(w.x - sweeper.x) < sweeperW/2 + w.halfW){
+        blockWord(w); words.splice(i,1); continue;
+      }
+    }
+    // ゴール到達 = 失点
+    if(w.y > goalLineY + 8){
+      concede(w); words.splice(i,1);
+    }
+  }
+
+  // 称号の昇格
+  if(tier<1 && score>=1000) enterAngel();
+  if(tier<2 && score>=2000) enterFootballGod();
+  // サッカーの神様の祝福：一定間隔で最もゴールに近い悪態を浄化
+  if(tier>=2){
+    god.t+=dt;
+    godT+=dt;
+    if(godT>=900 && words.length){ godT=0;
+      let idx=0,maxY=-1; for(let k=0;k<words.length;k++) if(words[k].y>maxY){maxY=words[k].y; idx=k;}
+      const tw=words[idx]; spawnBeam(god.x,god.y,tw.x,tw.y); playBlessZap();
+      blockWord(tw); words.splice(idx,1);
+    }
+  }
+  // ビームの寿命
+  for(let i=godBeams.length-1;i>=0;i--){ godBeams[i].life-=dt; if(godBeams[i].life<=0) godBeams.splice(i,1); }
+
+  // パーティクル
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=0.0012*dt; p.life-=dt;
+    if(p.life<=0) particles.splice(i,1);
+  }
+  // 浮上ワード
+  for(let i=floats.length-1;i>=0;i--){
+    const f=floats[i]; f.y-=0.045*dt; f.life-=dt;
+    if(f.life<=0) floats.splice(i,1);
+  }
+  if(shake>0) shake=Math.max(0, shake-dt*0.02);
+  if(flash>0) flash=Math.max(0, flash-dt*0.003);
+}
+
+function blockWord(w){
+  combo++; bestCombo=Math.max(bestCombo,combo); purified++;
+  const mult = 1 + Math.floor(combo/3) + (tier>=2?2:tier>=1?1:0);
+  score += 10*mult;
+  document.getElementById('score').textContent = score;
+  showCombo(mult);
+  burst(w.x, sweeperY, mult);
+  floats.push({x:w.x, y:sweeperY-10, text:w.kind, life:1300, fs:Math.max(15,w.fs)});
+  sBlock();
+}
+
+function concede(w){
+  lives--; combo=0; renderLives(); hideCombo();
+  shake=14; flash=1;
+  sConcede();
+  if(lives<=0) gameOver();
+}
+
+const comboEl=document.getElementById('combo');
+let comboTimer=null;
+function showCombo(mult){
+  if(combo<2) return;
+  comboEl.textContent = `${combo} COMBO` + (mult>1?`  x${mult}`:'');
+  comboEl.classList.add('show');
+  clearTimeout(comboTimer);
+  comboTimer=setTimeout(()=>comboEl.classList.remove('show'), 900);
+}
+function hideCombo(){ comboEl.classList.remove('show'); }
+
+function burst(x,y,mult){
+  const n = 12 + mult*3;
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2, sp=0.08+Math.random()*0.22;
+    particles.push({x,y, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-0.05,
+      life:380+Math.random()*260, size:2+Math.random()*3,
+      col: Math.random()<0.7?'#ffd45e':'#fff0bd'});
+  }
+}
+
+/* ---- 残機表示 ---- */
+const livesEl=document.getElementById('lives');
+function renderLives(){
+  livesEl.innerHTML='';
+  for(let i=0;i<3;i++){
+    const s=document.createElement('span');
+    s.className='life'+(i>=lives?' gone':''); s.textContent='♥';
+    s.style.color = i<lives ? '#ff5e6c' : '#5a6b58';
+    livesEl.appendChild(s);
+  }
+}
+
+/* ============================================================
+   描画
+   ============================================================ */
+function render(){
+  ctx.clearRect(0,0,W,H);
+  let ox=0, oy=0;
+  if(shake>0){ ox=(Math.random()-0.5)*shake; oy=(Math.random()-0.5)*shake; }
+  ctx.save(); ctx.translate(ox,oy);
+
+  drawPitch();
+  drawGoal();
+  if(god.active) drawGod();
+  // 落下中の悪態
+  for(const w of words) drawTaunt(w);
+  // 浄化ワード
+  for(const f of floats) drawFloat(f);
+  // パーティクル
+  for(const p of particles){
+    ctx.globalAlpha = Math.max(0, p.life/600);
+    ctx.fillStyle=p.col; ctx.beginPath();
+    ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha=1;
+  drawSweeper();
+  for(const b of godBeams) drawBeam(b);
+  ctx.restore();
+
+  // 失点フラッシュ
+  if(flash>0){
+    ctx.fillStyle=`rgba(255,40,55,${0.32*flash})`;
+    ctx.fillRect(0,0,W,H);
+  }
+}
+
+function drawPitch(){
+  // 横ストライプ芝
+  const bands=9, bh=H/bands;
+  for(let i=0;i<bands;i++){
+    ctx.fillStyle = i%2===0 ? 'rgba(20,80,46,0.55)' : 'rgba(13,62,35,0.55)';
+    ctx.fillRect(0, i*bh, W, bh+1);
+  }
+  // フラッドライトのビネット
+  const g=ctx.createRadialGradient(W/2,H*0.2,W*0.1, W/2,H*0.55,H*0.8);
+  g.addColorStop(0,'rgba(255,255,235,0.10)');
+  g.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+}
+
+function drawGoal(){
+  const gw=Math.min(W*0.62, 280), gx=(W-gw)/2, gy=goalLineY;
+  ctx.strokeStyle='rgba(238,244,224,0.85)'; ctx.lineWidth=3;
+  // ゴールライン
+  ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
+  // ペナルティアーク
+  ctx.lineWidth=2.5; ctx.strokeStyle='rgba(238,244,224,0.5)';
+  ctx.beginPath(); ctx.arc(W/2, gy, gw*0.5, Math.PI, Math.PI*2); ctx.stroke();
+  // ゴールネット
+  ctx.save();
+  ctx.strokeStyle='rgba(238,244,224,0.22)'; ctx.lineWidth=1;
+  const ny=gy, nh=H-gy;
+  for(let x=gx; x<=gx+gw; x+=14){ ctx.beginPath(); ctx.moveTo(x,ny); ctx.lineTo(x,ny+nh); ctx.stroke(); }
+  for(let y=ny; y<=ny+nh; y+=14){ ctx.beginPath(); ctx.moveTo(gx,y); ctx.lineTo(gx+gw,y); ctx.stroke(); }
+  ctx.strokeStyle='rgba(238,244,224,0.85)'; ctx.lineWidth=3;
+  ctx.strokeRect(gx,ny,gw,nh);
+  ctx.restore();
+}
+
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+
+function drawTaunt(w){
+  const pw=w.halfW*2, ph=w.h, x=w.x-w.halfW, y=w.y-ph/2;
+  ctx.save();
+  ctx.shadowColor='rgba(255,75,86,0.55)'; ctx.shadowBlur=16;
+  const g=ctx.createLinearGradient(0,y,0,y+ph);
+  g.addColorStop(0,'#ff6670'); g.addColorStop(1,'#e02e3b');
+  ctx.fillStyle=g; roundRect(x,y,pw,ph,ph/2); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.strokeStyle='rgba(255,255,255,0.35)'; ctx.lineWidth=1.5; roundRect(x,y,pw,ph,ph/2); ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.font=`700 ${w.fs}px "Noto Sans JP",sans-serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(w.text, w.x, w.y+1);
+  ctx.restore();
+}
+
+function drawFloat(f){
+  const a=Math.min(1, f.life/1300);
+  ctx.save(); ctx.globalAlpha=a;
+  ctx.font=`900 ${f.fs}px "Noto Sans JP",sans-serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.shadowColor='rgba(255,212,94,0.8)'; ctx.shadowBlur=14;
+  ctx.fillStyle='#ffe9a8'; ctx.fillText(f.text, f.x, f.y);
+  ctx.restore();
+}
+
+function drawSweeper(){
+  const x=sweeper.x, y=sweeperY, w=sweeperW;
+  // 守備範囲の薄いハイライト
+  ctx.save();
+  const g=ctx.createLinearGradient(x-w/2,0,x+w/2,0);
+  g.addColorStop(0,'rgba(82,214,255,0)'); g.addColorStop(0.5,'rgba(82,214,255,0.28)'); g.addColorStop(1,'rgba(82,214,255,0)');
+  ctx.fillStyle=g; ctx.fillRect(x-w/2, y-26, w, 52);
+  ctx.restore();
+  // 天使化（tier>=1）
+  if(tier>=1){
+    const pulse=0.5+0.5*Math.sin(performance.now()/300);
+    const aur=(tier>=2?100:80);
+    ctx.save();
+    const ag=ctx.createRadialGradient(x,y,4,x,y,aur);
+    ag.addColorStop(0,'rgba(255,236,150,0.25)'); ag.addColorStop(1,'rgba(255,212,94,0)');
+    ctx.fillStyle=ag; ctx.beginPath(); ctx.arc(x,y,aur,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=`rgba(255,224,130,${0.3+0.3*pulse})`; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(x,y,aur-3,0,Math.PI*2); ctx.stroke();
+    ctx.restore();
+    // 翼
+    ctx.save(); ctx.fillStyle='rgba(255,255,255,0.92)';
+    ctx.shadowColor='rgba(255,236,150,0.7)'; ctx.shadowBlur=8;
+    drawWing(x-w*0.3,y,-1); drawWing(x+w*0.3,y,1);
+    ctx.restore();
+    // 光輪
+    ctx.save(); ctx.strokeStyle='#ffe066'; ctx.lineWidth=4;
+    ctx.shadowColor='#ffd45e'; ctx.shadowBlur=12;
+    ctx.beginPath(); ctx.ellipse(x, y-28, 13, 5, 0,0,Math.PI*2); ctx.stroke();
+    ctx.restore();
+  }
+  // 影
+  ctx.fillStyle='rgba(0,0,0,0.35)';
+  ctx.beginPath(); ctx.ellipse(x, y+22, w*0.42, 7, 0,0,Math.PI*2); ctx.fill();
+  // 選手（簡易フィギュア）
+  ctx.save();
+  // ユニフォーム
+  const bg=ctx.createLinearGradient(0,y-6,0,y+20);
+  bg.addColorStop(0,'#62e0ff'); bg.addColorStop(1,'#2aa6d8');
+  ctx.fillStyle=bg;
+  roundRect(x-w*0.34, y-2, w*0.68, 26, 8); ctx.fill();
+  // 腕（広げて壁を作る）
+  ctx.strokeStyle='#52d6ff'; ctx.lineWidth=8; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(x-w*0.30,y+4); ctx.lineTo(x-w*0.5,y+12);
+  ctx.moveTo(x+w*0.30,y+4); ctx.lineTo(x+w*0.5,y+12); ctx.stroke();
+  // 頭
+  ctx.fillStyle='#ffd9b0';
+  ctx.beginPath(); ctx.arc(x, y-12, 10, 0, Math.PI*2); ctx.fill();
+  // 背番号
+  ctx.fillStyle='#06384a'; ctx.font='900 13px "Anton",sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('5', x, y+12);
+  ctx.restore();
+}
+
+function drawWing(px,py,dir){
+  ctx.beginPath();
+  ctx.moveTo(px,py-4);
+  ctx.quadraticCurveTo(px+dir*30,py-22, px+dir*42,py+2);
+  ctx.quadraticCurveTo(px+dir*30,py+0, px+dir*24,py+13);
+  ctx.quadraticCurveTo(px+dir*18,py+2, px,py-4);
+  ctx.closePath(); ctx.fill();
+}
+
+/* サッカーの神様（ブラジルカラーの祝福の化身・ジーコへのオマージュ）
+   実在人物の肖像ではなく、敬意を込めた象徴的なイラストとして描画 */
+function easeOut(t){ return 1-Math.pow(1-t,3); }
+function sparkle(x,y,r){
+  ctx.save(); ctx.fillStyle='rgba(255,245,200,0.9)'; ctx.translate(x,y);
+  ctx.beginPath();
+  for(let i=0;i<4;i++){ ctx.lineTo(0,-r); ctx.lineTo(r*0.3,-r*0.3); ctx.rotate(Math.PI/2); }
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+function drawGod(){
+  const cx=god.x, cy=god.y, tn=performance.now();
+  const grow=easeOut(Math.min((god.t||0)/450,1));
+  const bob=Math.sin(tn/520)*4;
+  ctx.save();
+  ctx.translate(cx, cy+bob);
+  ctx.globalAlpha=Math.min(1,(god.t||0)/240);
+  ctx.scale(grow,grow);
+
+  // 後光（金＋ブラジルグリーン）
+  const halo=ctx.createRadialGradient(0,0,10,0,0,155);
+  halo.addColorStop(0,'rgba(255,240,170,0.6)');
+  halo.addColorStop(0.42,'rgba(120,224,138,0.2)');
+  halo.addColorStop(1,'rgba(255,212,94,0)');
+  ctx.fillStyle=halo; ctx.beginPath(); ctx.arc(0,0,155,0,Math.PI*2); ctx.fill();
+  // 回転する光線
+  ctx.strokeStyle='rgba(255,228,140,0.30)'; ctx.lineWidth=3;
+  for(let i=0;i<16;i++){ const a=tn/2400+i*Math.PI/8;
+    ctx.beginPath(); ctx.moveTo(Math.cos(a)*42,Math.sin(a)*42);
+    ctx.lineTo(Math.cos(a)*140,Math.sin(a)*140); ctx.stroke(); }
+  // きらめき
+  for(let i=0;i<6;i++){ const a=tn/950+i*1.05, r=78+Math.sin(tn/300+i)*16;
+    sparkle(Math.cos(a)*r, Math.sin(a)*r*0.65-6, 4+Math.sin(tn/200+i)); }
+  // 雲（足元）
+  ctx.fillStyle='rgba(245,248,255,0.92)';
+  [[-44,78,20],[-16,84,24],[18,84,22],[46,78,18],[0,90,18]].forEach(c=>{
+    ctx.beginPath(); ctx.arc(c[0],c[1],c[2],0,Math.PI*2); ctx.fill(); });
+
+  // ===== 体（ブラジル黄のユニフォーム・背番号10） =====
+  ctx.save(); ctx.translate(0,34);
+  ctx.fillStyle='rgba(0,0,0,0.16)'; ctx.beginPath(); ctx.ellipse(0,66,44,11,0,0,Math.PI*2); ctx.fill();
+  // 脚
+  ctx.fillStyle='#f7f1e6'; roundRect(-19,40,15,28,5); ctx.fill(); roundRect(4,40,15,28,5); ctx.fill();
+  // ソックス＆シューズ
+  ctx.fillStyle='#1f8f47'; roundRect(-19,60,15,11,4); ctx.fill(); roundRect(4,60,15,11,4); ctx.fill();
+  // ユニフォーム
+  const jg=ctx.createLinearGradient(0,-8,0,46);
+  jg.addColorStop(0,'#ffe23b'); jg.addColorStop(1,'#f3b800');
+  ctx.fillStyle=jg; roundRect(-33,-8,66,52,15); ctx.fill();
+  // 襟（緑）
+  ctx.fillStyle='#1f8f47'; roundRect(-13,-10,26,8,4); ctx.fill();
+  // 背番号 10
+  ctx.fillStyle='#1f8f47'; ctx.font='900 26px "Anton",sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('10', 0, 20);
+  // 腕（両手を高く上げた祝福ポーズ）
+  ctx.strokeStyle='#e7a877'; ctx.lineWidth=11; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-26,-2); ctx.lineTo(-47,-44); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(26,-2);  ctx.lineTo(47,-44);  ctx.stroke();
+  ctx.fillStyle='#e7a877';
+  ctx.beginPath(); ctx.arc(-48,-46,6.5,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(48,-46,6.5,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // ===== 頭 =====
+  ctx.save(); ctx.translate(0,-32);
+  ctx.fillStyle='#e7a877'; roundRect(-7,9,14,13,4); ctx.fill();         // 首
+  ctx.fillStyle='#f2bd92'; ctx.beginPath(); ctx.arc(0,0,20,0,Math.PI*2); ctx.fill(); // 顔
+  // ヒゲ（あごひげ・カール）— 顔の下半分を縁取る
+  ctx.fillStyle='#1e1814';
+  [[-17,3,6.5],[-16,10,6],[-10,16,6],[-2,18.5,6],[6,18,6],[13,14,6],[17,7,6],[17,-1,5.5]]
+    .forEach(c=>{ ctx.beginPath(); ctx.arc(c[0],c[1],c[2],0,Math.PI*2); ctx.fill(); });
+  // 顔の素肌を少し戻す（ヒゲの内側）
+  ctx.fillStyle='#f2bd92'; ctx.beginPath(); ctx.arc(0,2,12,0,Math.PI*2); ctx.fill();
+  // 髪（カールを強調・もこもこ）
+  ctx.fillStyle='#1e1814';
+  ctx.beginPath(); ctx.arc(0,-5,22,Math.PI,0); ctx.fill();
+  const curls=[[-21,-9,8.5],[-15,-19,9.5],[-4,-25,10],[8,-23,9.5],[19,-12,8.5],
+               [-23,0,7],[23,-1,7],[2,-27,8],[-10,-26,7.5],[14,-21,7]];
+  curls.forEach(c=>{ ctx.beginPath(); ctx.arc(c[0],c[1],c[2],0,Math.PI*2); ctx.fill(); });
+  // もみあげ
+  ctx.fillRect(-20,-4,4,11); ctx.fillRect(16,-4,4,11);
+  // 目
+  ctx.fillStyle='#241d1a';
+  ctx.beginPath(); ctx.arc(-7,-1,2.4,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(7,-1,2.4,0,Math.PI*2); ctx.fill();
+  // 口ひげ
+  ctx.fillStyle='#1e1814';
+  ctx.beginPath(); ctx.ellipse(-4.5,5.5,4.5,2.2,0.35,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(4.5,5.5,4.5,2.2,-0.35,0,Math.PI*2); ctx.fill();
+  // 笑顔
+  ctx.strokeStyle='#9c5b3a'; ctx.lineWidth=2.2; ctx.lineCap='round';
+  ctx.beginPath(); ctx.arc(0,7,6.5,0.12*Math.PI,0.88*Math.PI); ctx.stroke();
+  // 月桂冠（緑＋金）
+  ctx.strokeStyle='#3bbf63'; ctx.lineWidth=4;
+  ctx.beginPath(); ctx.arc(0,-2,24,Math.PI*0.82,Math.PI*0.18,true); ctx.stroke();
+  ctx.fillStyle='#ffd45e';
+  for(let i=0;i<5;i++){ const a=Math.PI*0.82 - i*(Math.PI*0.64/4);
+    ctx.beginPath(); ctx.arc(Math.cos(a)*24, -2+Math.sin(a)*24, 3.2,0,Math.PI*2); ctx.fill(); }
+  ctx.restore();
+
+  // ===== 黄金のサッカーボール（祝福） =====
+  const by=-92+Math.sin(tn/350)*5;
+  ctx.save(); ctx.shadowColor='#ffd45e'; ctx.shadowBlur=20;
+  ctx.fillStyle='#ffe27a'; ctx.strokeStyle='#a9791f'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.arc(0,by,15,0,Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.shadowBlur=0; ctx.fillStyle='#7a5a12';
+  ctx.beginPath(); ctx.arc(0,by,4,0,Math.PI*2); ctx.fill();
+  for(let i=0;i<5;i++){ const a=i*Math.PI*2/5 - Math.PI/2;
+    ctx.beginPath(); ctx.arc(Math.cos(a)*9, by+Math.sin(a)*9, 1.8,0,Math.PI*2); ctx.fill(); }
+  ctx.restore();
+
+  // ラベル
+  ctx.globalAlpha*=0.9;
+  ctx.fillStyle='#fff6d0'; ctx.font='700 11px "Noto Sans JP",sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.shadowColor='rgba(0,0,0,0.5)'; ctx.shadowBlur=6;
+  ctx.fillText('⚽ サッカーの神様 ⚽', 0, 116);
+  ctx.restore();
+}
+
+function drawBeam(b){
+  const a=Math.max(0,b.life/260);
+  ctx.save(); ctx.globalAlpha=a;
+  ctx.strokeStyle='#fff2b0'; ctx.lineWidth=4; ctx.lineCap='round';
+  ctx.shadowColor='#ffd45e'; ctx.shadowBlur=18;
+  ctx.beginPath(); ctx.moveTo(b.x1,b.y1);
+  const seg=6;
+  for(let i=1;i<=seg;i++){
+    const t=i/seg;
+    const x=b.x1+(b.x2-b.x1)*t + (i<seg?(Math.random()-0.5)*14:0);
+    const yy=b.y1+(b.y2-b.y1)*t;
+    ctx.lineTo(x,yy);
+  }
+  ctx.stroke(); ctx.restore();
+}
+
+/* ============================================================
+   画面遷移
+   ============================================================ */
+const openingScreen=document.getElementById('openingScreen');
+const startScreen=document.getElementById('startScreen');
+const overScreen=document.getElementById('overScreen');
+
+// 開幕：口笛 → アンセム → 紙吹雪 → スタート画面へ
+document.getElementById('openBtn').addEventListener('click', ()=>{
+  ensureAudio();
+  playWhistle();
+  setTimeout(startAnthem, 300);
+  confettiBurst(110);
+  openingScreen.classList.add('hidden');
+  startScreen.classList.remove('hidden');
+  state='menu';
+});
+
+function startGame(){
+  unlockAudio();
+  stopAnthem();
+  reset();
+  openingScreen.classList.add('hidden');
+  startScreen.classList.add('hidden');
+  overScreen.classList.add('hidden');
+  setAIState(generating);
+  state='playing'; last=performance.now();
+  // 開始と同時にAIへ追加生成を要求（プレイは内蔵辞書で即スタート）
+  if(queue.length < 10) generateWords();
+}
+
+function gameOver(){
+  stopGodMusic(); try{ speechSynthesis.cancel(); }catch(e){}
+  god.active=false;
+  state='over';
+  document.getElementById('rScore').textContent=score;
+  document.getElementById('rPurify').textContent=purified;
+  document.getElementById('rCombo').textContent=bestCombo;
+  // ハイスコア判定
+  const isRecord = score>highScore;
+  if(isRecord){ highScore=score; saveHighScore(highScore); confettiBurst(70); }
+  document.getElementById('rBest').textContent=highScore;
+  const rec=document.getElementById('rRecord'); if(rec) rec.classList.toggle('hidden', !isRecord);
+  updateHighScoreUI();
+  document.getElementById('rMsg').textContent = resultFallback(score);
+  overScreen.classList.remove('hidden');
+  generateResultComment(score, purified, bestCombo);
+}
+
+// 通信できない時の内蔵講評（スコア帯ごと）
+function resultFallback(sc){
+  if(sc>=2000) return '神の領域。これだけの悪態を浄化したあなたの心は、もう大海のように広い。';
+  if(sc>=1000) return '見事な浄化。悪態をやさしさに変えるたび、あなたの心も少し広くなった。';
+  if(sc>=400)  return 'いい守り。悪態に飲み込まれず、受け止める強さが育ってきている。';
+  return '止めきれなくても大丈夫。もう一度ピッチに立てば、心はきっと軽くなる。さあリベンジを！';
+}
+
+// AIがスコアに応じた講評を生成（高得点は称賛、低得点は前向きに言い換えて再挑戦を後押し）
+async function generateResultComment(sc, pf, cb){
+  const note=document.getElementById('rAi');
+  if(note) note.style.display='block';
+  const prompt =
+`あなたは「悪態スイーパー」というゲームの温かい講評者です。プレイヤーはゴールに飛んでくる悪態（暴言）をスイーパーで止め、AIがそれを優しい言葉に浄化します。
+今回の結果：スコア ${sc}点／浄化した悪態 ${pf}個／ベストコンボ ${cb}。
+
+この結果への日本語の講評を1〜2文で書いてください。
+- スコアが高いほど、たくさんの悪態を浄化したことを称え、「あなたの心も広く穏やかになった」と前向きに讃える。
+- スコアが低い場合は決して責めず、ネガティブをポジティブに言い換え、「もう一度」プレイしたくなるよう優しく背中を押す。
+- 悪態を掃除して心を浄化する、という世界観に沿った比喩を使ってよい。温かく、押しつけがましくない口調で。
+出力は講評の本文のみ。前置き・記号・引用符・コードフェンスは不要。`;
+  try{
+    const res=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:300,
+        messages:[{role:"user", content:prompt}] })
+    });
+    const data=await res.json();
+    let text=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join(" ").replace(/```/g,'').trim();
+    if(text && state==='over'){ document.getElementById('rMsg').textContent=text; }
+  }catch(e){
+    // フォールバック講評をそのまま表示
+  }finally{
+    if(note) note.style.display='none';
+  }
+}
+
+document.getElementById('startBtn').addEventListener('click', ()=>{ ensureAudio(); startGame(); });
+document.getElementById('retryBtn').addEventListener('click', ()=>{ ensureAudio(); startGame(); });
+
+/* ============================================================
+   ユーティリティ & 起動
+   ============================================================ */
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+function rand(a,b){return a+Math.random()*(b-a);}
+function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}}
+
+/* ハイスコアの記録（アーティファクト永続ストレージ。非対応環境はセッション内のみ） */
+let highScore=0;
+function updateHighScoreUI(){
+  const el=document.getElementById('hiScoreStart');
+  if(el){
+    if(highScore>0){ el.textContent='🏆 ハイスコア '+highScore; el.style.display='block'; }
+    else el.style.display='none';
+  }
+}
+async function loadHighScore(){
+  try{ const r=await window.storage.get('akutai_highscore'); if(r&&r.value) highScore=parseInt(r.value,10)||0; }
+  catch(e){ /* キー未作成 or 非対応 */ }
+  updateHighScoreUI();
+}
+async function saveHighScore(v){ try{ await window.storage.set('akutai_highscore', String(v)); }catch(e){} }
+
+resize();
+seedFallback();          // 即プレイ可能に
+generateWords();         // 起動時にAIの新ネタも先読み
+renderLives();
+confettiBurst(40);       // オープニングに彩り
+loadHighScore();         // 前回のハイスコアを表示
+try{ if('speechSynthesis' in window){ speechSynthesis.getVoices(); speechSynthesis.onvoiceschanged=()=>speechSynthesis.getVoices(); } }catch(e){}
+requestAnimationFrame(loop);
+</script>
